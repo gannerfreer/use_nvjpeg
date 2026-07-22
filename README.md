@@ -127,6 +127,97 @@ GStreamer 线程，但不包含 VIC/JPEG 固定功能硬件的工作量。配套
 并非经过隔离负载、锁频和多轮统计的正式性能基准。生成的彩条/渐变虽然是原生 YUV422，
 但内容比真实相机画面简单；实际 JPEG 大小仍应使用相机原始 YUV422 帧复测。
 
+## 海康 MVS YUV422Packed（UYVY）复测
+
+2026-07-22 在测试机 `gray@10.10.1.220`（aarch64、Jetson Linux R36.3）上，按海康
+MVS `YUV422Packed` 的 UYVY 字节顺序重新生成测试帧，并再次验证完整硬件管线：
+
+```text
+MVS YUV422Packed：U0 Y0 V0 Y1，16 bit/pixel
+→ appsrc
+→ nvvidconv compute-hw=2
+→ NVMM NV12
+→ nvjpegenc quality=85
+→ JPEG 4:2:0
+```
+
+测试输入为 1440×1080、BT.709 limited-range 彩条和灰度渐变。文件大小为
+3,110,400 bytes，严格等于 `1440 × 1080 × 2`。文件开头为重复的
+`80 eb 80 eb`，与白色区域的 `U Y0 V Y1` 排列一致，确认生成的是 UYVY，而不是
+YUY2。测试程序使用这张只读模板帧完成 30 帧预热和 300 帧正式测试。
+
+运行参数：
+
+```text
+format=UYVY
+width=1440
+height=1080
+fps=30
+quality=85
+warmup=30
+frames=300
+```
+
+实测结果：
+
+| 项目 | 结果 |
+|---|---:|
+| 处理帧数 | 300（另有 30 帧预热） |
+| 测试用时 | 1.719 s |
+| 管线吞吐 | 174.554 FPS |
+| 进程 CPU | 27.611%（100% 表示一个核心） |
+| 进程 CPU 时间 | 0.475 s |
+| 原始帧大小 | 3,110,400 bytes |
+| JPEG 平均大小 | 45,670 bytes |
+| 原始/JPEG 压缩比 | 68.106:1 |
+| 体积减少 | 98.532% |
+| 30 FPS JPEG 码流 | 10.961 Mbit/s |
+| 平均端到端延迟 | 61.929 ms |
+| 延迟 P50 / P95 / P99 | 62.997 / 64.615 / 65.067 ms |
+
+输出 JPEG 的 SOI/EOI 标记为 `FFD8/FFD9`，本机复核为 1440×1080 baseline JPEG、
+`yuvj420p`。目视检查白、黄、青、绿、品红、红、蓝彩条及灰度渐变均正常，没有
+UYVY/YUY2 选择错误导致的偏色。
+
+### Quality 90～95 逐档测试
+
+在相同测试机和输入帧上，对 quality 90、91、92、93、94、95 分别执行 30 帧预热和
+300 帧正式测试。各档位均成功生成完整 JPEG：
+
+| Quality | JPEG 平均大小 | 压缩比 | 体积减少 | 30 FPS 码流 | 吞吐 | 进程 CPU | 平均延迟 | P95 延迟 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 90 | 50,403 B | 61.711:1 | 98.380% | 12.097 Mbit/s | 176.733 FPS | 26.989% | 61.175 ms | 62.442 ms |
+| 91 | 50,617 B | 61.450:1 | 98.373% | 12.148 Mbit/s | 165.679 FPS | 28.551% | 65.259 ms | 67.557 ms |
+| 92 | 50,791 B | 61.239:1 | 98.367% | 12.190 Mbit/s | 172.919 FPS | 27.701% | 62.528 ms | 64.652 ms |
+| 93 | 55,555 B | 55.988:1 | 98.214% | 13.333 Mbit/s | 166.685 FPS | 28.845% | 64.864 ms | 66.545 ms |
+| 94 | 57,329 B | 54.255:1 | 98.157% | 13.759 Mbit/s | 174.235 FPS | 27.609% | 62.056 ms | 63.884 ms |
+| 95 | 61,147 B | 50.868:1 | 98.034% | 14.675 Mbit/s | 174.277 FPS | 27.523% | 62.042 ms | 64.033 ms |
+
+`nvjpegenc` 的 quality 会映射到离散的 JPEG 量化表，因此文件大小不会随 quality
+线性变化。本测试中 90～92 的大小差异较小，而 92→93 出现明显跳变。真实相机画面的
+纹理和噪声不同，绝对文件大小仍会变化。
+
+逐档日志和 JPEG 保存在：
+
+```text
+/home/gray/data/use_nvjpeg_test/mvs_yuv422packed_uyvy_rerun_20260722/quality_90_95/
+├── bench_hik_mvs_uyvy_q90.log ... bench_hik_mvs_uyvy_q95.log
+└── result_hik_mvs_uyvy_q90.jpg ... result_hik_mvs_uyvy_q95.jpg
+```
+
+本次新结果独立保存在测试机中，没有覆盖以前的测试文件：
+
+```text
+/home/gray/data/use_nvjpeg_test/mvs_yuv422packed_uyvy_rerun_20260722/
+├── hik_mvs_1440x1080_yuv422packed_uyvy.yuv
+├── result_hik_mvs_uyvy_q85.jpg
+└── bench_hik_mvs_uyvy_q85.log
+```
+
+这次测试验证的是与海康 MVS `YUV422Packed` 内存布局兼容的合成帧，以及
+`UYVY → NV12 → JPEG` 硬件链路；尚未包含相机 MVS 回调、GigE/GVSP 收包和真实场景
+噪声。真实 JPEG 大小、输出码率和采集端到端延迟仍需用相机实际帧复测。
+
 ## 海康 MVS 相机 YUV422 输入码率
 
 海康 MVS 中 `YUV422Packed` 和 `YUV 422 (YUYV) Packed` 的像素大小为
