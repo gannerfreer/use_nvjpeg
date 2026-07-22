@@ -18,6 +18,7 @@
 #include <numeric>
 #include <optional>
 #include <string>
+#include <sys/resource.h>
 #include <vector>
 
 namespace {
@@ -47,10 +48,26 @@ struct BenchmarkState {
   std::uint64_t measured_jpeg_bytes = 0;
   Clock::time_point measured_start;
   Clock::time_point measured_end;
+  double measured_cpu_start_seconds = 0.0;
+  double measured_cpu_end_seconds = 0.0;
   bool have_measured_start = false;
   bool have_measured_end = false;
   GstBuffer *first_measured_jpeg = nullptr;
 };
+
+double process_cpu_seconds() {
+  rusage usage{};
+  if (getrusage(RUSAGE_SELF, &usage) != 0) {
+    return 0.0;
+  }
+  const double user_seconds =
+      static_cast<double>(usage.ru_utime.tv_sec) +
+      static_cast<double>(usage.ru_utime.tv_usec) / 1'000'000.0;
+  const double system_seconds =
+      static_cast<double>(usage.ru_stime.tv_sec) +
+      static_cast<double>(usage.ru_stime.tv_usec) / 1'000'000.0;
+  return user_seconds + system_seconds;
+}
 
 void print_usage(const char *program) {
   std::cout
@@ -249,6 +266,7 @@ GstFlowReturn on_new_sample(GstAppSink *sink, gpointer user_data) {
       }
       if (frame_index + 1 == state.expected_frames) {
         state.measured_end = now;
+        state.measured_cpu_end_seconds = process_cpu_seconds();
         state.have_measured_end = true;
       }
     }
@@ -313,6 +331,17 @@ void print_statistics(const Options &options, const BenchmarkState &state) {
       static_cast<double>(state.measured_latencies_ms.size());
   const double average_jpeg = static_cast<double>(state.measured_jpeg_bytes) /
                               static_cast<double>(options.measured_frames);
+  const double raw_frame_bytes = static_cast<double>(options.width) *
+                                 static_cast<double>(options.height) * 2.0;
+  const double compression_ratio = raw_frame_bytes / average_jpeg;
+  const double size_reduction_percent =
+      (1.0 - average_jpeg / raw_frame_bytes) * 100.0;
+  const double estimated_stream_mbps =
+      average_jpeg * 8.0 * static_cast<double>(options.fps) / 1'000'000.0;
+  const double process_cpu_seconds_used =
+      state.measured_cpu_end_seconds - state.measured_cpu_start_seconds;
+  const double process_cpu_percent =
+      process_cpu_seconds_used / elapsed_seconds * 100.0;
 
   std::cout << std::fixed << std::setprecision(3) << "\nBenchmark result\n"
             << "  input:          " << options.width << 'x' << options.height
@@ -321,7 +350,15 @@ void print_statistics(const Options &options, const BenchmarkState &state) {
             << "  measured frames:" << options.measured_frames << '\n'
             << "  elapsed:        " << elapsed_seconds << " s\n"
             << "  throughput:     " << throughput << " fps\n"
+            << "  process CPU:    " << process_cpu_percent
+            << " % (100% = one core)\n"
+            << "  process CPU time:" << process_cpu_seconds_used << " s\n"
+            << "  raw YUV422 size: " << raw_frame_bytes << " bytes\n"
             << "  JPEG avg size:  " << average_jpeg << " bytes\n"
+            << "  compression:    " << compression_ratio << ":1\n"
+            << "  size reduction: " << size_reduction_percent << " %\n"
+            << "  stream @ " << options.fps << " fps: " << estimated_stream_mbps
+            << " Mbit/s\n"
             << "  latency avg:    " << average_latency << " ms\n"
             << "  latency p50:    "
             << percentile(state.measured_latencies_ms, 0.50) << " ms\n"
@@ -352,6 +389,7 @@ bool push_frame(GstAppSrc *appsrc, GstBuffer *template_buffer,
     state.pushed_at[index] = pushed_at;
     if (index == state.warmup_frames) {
       state.measured_start = pushed_at;
+      state.measured_cpu_start_seconds = process_cpu_seconds();
       state.have_measured_start = true;
     }
   }

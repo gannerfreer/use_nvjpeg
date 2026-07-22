@@ -88,7 +88,7 @@ def parse_args() -> argparse.Namespace:
         description="Generate one packed BT.709 limited-range YUV422 test frame."
     )
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--width", type=int, default=1920)
+    parser.add_argument("--width", type=int, default=1440)
     parser.add_argument("--height", type=int, default=1080)
     parser.add_argument(
         "--format", choices=("yuy2", "uyvy"), default="yuy2", dest="pixel_format"
